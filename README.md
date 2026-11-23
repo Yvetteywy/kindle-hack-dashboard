@@ -33,6 +33,20 @@ checks the display dimensions without changing rotation and rejects unsupported
 screens before stopping the Kindle UI or changing screensaver settings.
 Device rotation and UI recovery still need verification on actual hardware.
 
+## Visual previews
+
+These are software-rendered previews of the dashboard's drawing commands with
+sample data, not screenshots captured from a Kindle. Actual device rendering
+remains unverified.
+
+### Portrait (600×800)
+
+![Portrait dashboard preview](./Asset/mydashboard-portrait-preview.png)
+
+### Landscape (800×600)
+
+![Landscape dashboard preview](./Asset/mydashboard-landscape-preview.png)
+
 ## Install and use
 
 1. Install KUAL and copy [MyDashboard](./MyDashboard/) to
