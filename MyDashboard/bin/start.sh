@@ -5,11 +5,21 @@ ROOT=${BIN%/bin}
 PATH="$BIN:$PATH:/usr/bin:/usr/sbin:/bin:/sbin"
 export PATH
 STATE=/tmp/mydashboard.run
-LOG=/tmp/mydashboard.log
+LOG=/mnt/us/mydashboard.log
+
+if [ "${1:-}" = --run ]; then
+    orientation=${2:-landscape}
+else
+    orientation=${1:-landscape}
+fi
+case "$orientation" in
+    landscape|portrait) ;;
+    *) echo "MyDashboard: unknown orientation: $orientation" >&2; exit 1 ;;
+esac
 
 if [ "${1:-}" != --run ]; then
     command -v nohup >/dev/null 2>&1 || { echo "MyDashboard: missing nohup" >&2; exit 1; }
-    set -- /bin/sh "$BIN/start.sh" --run
+    set -- /bin/sh "$BIN/start.sh" --run "$orientation"
     if command -v setsid >/dev/null 2>&1; then
         set -- setsid "$@"
     fi
@@ -69,6 +79,25 @@ rm -f "$LOG.status"
 sleep 2
 stop_requested && exit 0
 
+display=$(fbink -q -V -e) || fail "cannot read framebuffer dimensions."
+dimensions=$(printf '%s\n' "$display" |
+    sed -n 's/.*screenWidth=\([0-9][0-9]*\);screenHeight=\([0-9][0-9]*\);.*/\1x\2/p')
+case "$dimensions" in
+    600x800|800x600)
+        if [ "$orientation" = portrait ]; then
+            target_dimensions=600x800
+        else
+            target_dimensions=800x600
+        fi
+        ;;
+    1072x1448|1448x1072)
+        [ "$orientation" = landscape ] || fail "portrait layout requires a 600x800 display. Kindle UI left unchanged."
+        target_dimensions=1448x1072
+        ;;
+    '') fail "cannot parse framebuffer dimensions." ;;
+    *) fail "unsupported framebuffer: $dimensions; dashboard requires 800x600 or 1448x1072 landscape. Kindle UI left unchanged." ;;
+esac
+
 rotation=$(fbdepth -q -o) || fail "cannot read framebuffer rotation."
 case "$rotation" in [0-3]) ;; *) fail "invalid framebuffer rotation: $rotation" ;; esac
 
@@ -85,14 +114,22 @@ lipc-set-prop -i com.lab126.powerd preventScreenSaver 1 || fail "could not disab
 restore_ui=1
 initctl stop "$ui_job" || fail "could not stop $ui_job."
 
-landscape() {
-    fbdepth -q -r "$1" &&
-        fbink -q -V -e | grep -q 'screenWidth=1448;screenHeight=1072;'
+display_matches() {
+    fbink -q -V -e | grep -q "screenWidth=${target_dimensions%x*};screenHeight=${target_dimensions#*x};"
 }
-landscape CW || landscape CCW || fail "FBInk did not report a 1448x1072 framebuffer."
+rotate_display() {
+    fbdepth -q -r "$1" && display_matches
+}
+if ! display_matches; then
+    if [ "$orientation" = portrait ]; then
+        rotate_display UR || rotate_display UD || fail "FBInk did not report a $target_dimensions framebuffer."
+    else
+        rotate_display CW || rotate_display CCW || fail "FBInk did not report a $target_dimensions framebuffer."
+    fi
+fi
 stop_requested && exit 0
 
-/bin/sh "$BIN/dashboard.sh" "$STATE" </dev/null &
+/bin/sh "$BIN/dashboard.sh" "$STATE" "$target_dimensions" </dev/null &
 worker=$!
 wait "$worker"
 result=$?

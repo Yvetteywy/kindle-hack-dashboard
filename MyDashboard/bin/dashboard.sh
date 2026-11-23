@@ -8,6 +8,25 @@ LC_ALL=C
 TZ='PST8PDT,M3.2.0,M11.1.0'
 export LC_ALL TZ
 
+layout=${2:-1448x1072}
+case "$layout" in
+    800x600|600x800)
+        text_size=2
+        ;;
+    1448x1072)
+        text_size=3 clock_size=11
+        left=48 right=792
+        clock_y=70 date_y=200 summary_y=350 quote_y=744
+        calendar_y=84 forecast_y=450
+        date_width=29 text_width=27 calendar_width=24
+        date_format='%A, %B %d %Y'
+        ;;
+    *)
+        echo "MyDashboard: unsupported layout: $2" >&2
+        exit 1
+        ;;
+esac
+
 URL='https://api.open-meteo.com/v1/forecast?latitude=47.5301&longitude=-122.0326&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&hourly=temperature_2m&forecast_hours=12&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America%2FLos_Angeles&timeformat=unixtime'
 
 stop_requested() { [ -f "$STATE/stop" ] || [ -f "$ROOT/STOP" ]; }
@@ -133,7 +152,7 @@ block() {
         NR <= h { print substr($0 pad, 1, w) }
         END { for (i = NR; i < h; i++) print pad }
     ') || return 1
-    fbink -q -V -S 3 -X "$x" -Y "$y" -- "$padded"
+    fbink -q -V -F IBM -S "$text_size" -X "$x" -Y "$y" -- "$padded"
 }
 
 forecast() {
@@ -154,9 +173,203 @@ forecast() {
     } < "$STATE/weather"
 }
 
+panel_text() {
+    fbink -q -V -b -F IBM -S "$3" -X "$1" -Y "$2" -- "$4"
+}
+
+panel_rect() {
+    fbink -q -V -b -B BLACK -k "left=$1,top=$2,width=$3,height=$4"
+}
+
+panel_calendar() {
+    cal_left=$1 cal_width=$2 cal_top=$3 cal_step=$4 cal_row=$5
+    cal_grid=$((cal_left + (cal_width - (6 * cal_step + 32)) / 2))
+    stamp=$(date '+%m %Y %d %w %B') || return 1
+    set -- $stamp
+    heading="$5 $2"
+    panel_text "$((cal_left + (cal_width - ${#heading} * 16) / 2))" "$cal_top" 2 "$heading" || return 1
+    awk -v m="$1" -v y="$2" -v today="$3" -v weekday="$4" \
+        -v x="$cal_grid" -v top="$cal_top" -v step="$cal_step" -v row="$cal_row" '
+        BEGIN {
+            days = 31
+            if (m == 4 || m == 6 || m == 9 || m == 11) days = 30
+            if (m == 2) days = 28 + (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0))
+            first = (weekday - today + 36) % 7
+            split("Su Mo Tu We Th Fr Sa", labels, " ")
+            for (i = 0; i < 7; i++) print x + i * step, top + 40, 0, labels[i + 1]
+            for (d = 1; d <= days; d++) {
+                slot = first + d - 1
+                printf "%d %d %d %02d\n", x + (slot % 7) * step,
+                    top + 74 + int(slot / 7) * row, d == today, d
+            }
+        }
+    ' | while read -r cx cy selected label; do
+        if [ "$selected" -eq 1 ]; then
+            fbink -q -V -b -h -F IBM -S 2 -X "$cx" -Y "$cy" -- "$label" || exit 1
+        else
+            panel_text "$cx" "$cy" 2 "$label" || exit 1
+        fi
+    done
+}
+
+panel_forecast() {
+    forecast_column=$(($1 / 4)) forecast_top=$2 forecast_size=$3
+    zone=$(date '+%Z') || return 1
+    panel_text 16 "$((forecast_top + 16))" 1 "HOURLY TEMPERATURES ($zone)" || return 1
+    if [ ! -s "$STATE/weather" ]; then
+        panel_text 24 "$((forecast_top + 60))" 2 "No forecast available"
+        return
+    fi
+    {
+        read -r header
+        index=0
+        shown=0
+        while read -r epoch temperature; do
+            # Four samples span the next 12 hours: offsets 0, 3, 6, and 9.
+            if [ "$((index % 3))" -eq 0 ] && [ "$shown" -lt 4 ]; then
+                hour=$(date -d "@$epoch" '+%H:%M') || return 1
+                fx=$((24 + shown * forecast_column))
+                panel_text "$fx" "$((forecast_top + 50))" 2 "$hour" || return 1
+                if [ "$temperature" != -- ]; then
+                    temperature="$temperature F"
+                fi
+                panel_text "$fx" "$((forecast_top + 82))" "$forecast_size" "$temperature" || return 1
+                shown=$((shown + 1))
+            fi
+            index=$((index + 1))
+        done
+    } < "$STATE/weather"
+}
+
+panel_icon() {
+    case "$1" in
+        0|1)
+            rows='...#... .#...#. ..###.. #.###.# ..###.. .#...#. ...#...'
+            ;;
+        2|3|45|48)
+            rows='....... ..###.. .#####. ####### ####### ....... .......'
+            ;;
+        51|53|55|56|57|61|63|65|66|67|80|81|82)
+            rows='..###.. .#####. ####### ....... .#.#.#. #.#.#.. .......'
+            ;;
+        71|73|75|77|85|86)
+            rows='..###.. .#####. ####### ....... .#...#. ###.### .#...#.'
+            ;;
+        95|96|99)
+            rows='..###.. .#####. ####### ...#... ..##... ...##.. ...#...'
+            ;;
+        *) return 0 ;;
+    esac
+    printf '%s\n' "$rows" | awk -v x="$2" -v y="$3" '{
+        for (r = 1; r <= NF; r++)
+            for (c = 1; c <= length($r); c++)
+                if (substr($r, c, 1) == "#") print x + (c - 1) * 7, y + (r - 1) * 7
+    }' | while read -r ix iy; do
+        panel_rect "$ix" "$iy" 7 7 || exit 1
+    done
+}
+
+wrap_text() {
+    awk -v width="$1" '{
+        line = ""
+        for (i = 1; i <= NF; i++) {
+            if (line != "" && length(line) + length($i) + 1 > width) { print line; line = "" }
+            line = line (line == "" ? "" : " ") $i
+        }
+        print line
+    }'
+}
+
+render_portrait() {
+    panel_rect 240 12 1 296 &&
+        panel_rect 0 320 600 1 &&
+        panel_rect 240 340 1 280 &&
+        panel_rect 0 656 600 1 &&
+        panel_rect 150 702 1 62 &&
+        panel_rect 300 702 1 62 &&
+        panel_rect 450 702 1 62 &&
+        panel_text 20 100 5 "$clock" &&
+        panel_text 16 170 2 "$today" &&
+        panel_text 84 212 3 "$weekday" &&
+        panel_calendar 240 360 28 48 30 &&
+        panel_text 16 364 2 "Issaquah, WA" || return 1
+
+    if [ -s "$STATE/weather" ]; then
+        read -r temp humidity code wind < "$STATE/weather" || return 1
+        description=$(condition "$code" | wrap_text 13) || return 1
+        panel_text 16 412 4 "$temp F" &&
+            panel_icon "$code" 172 480 &&
+            panel_text 16 550 2 "$description" &&
+            panel_text 264 364 2 "Humidity" &&
+            panel_text 264 398 3 "$humidity%" &&
+            panel_text 440 364 2 "Wind" &&
+            panel_text 440 398 2 "$wind mph" || return 1
+    else
+        panel_text 16 420 2 "Weather
+unavailable" || return 1
+    fi
+    quote=$(printf '%s\n' "$quote" | wrap_text 20) || return 1
+    panel_text 264 510 1 "DAILY QUOTE" &&
+        panel_text 264 538 2 "$quote" &&
+        panel_text 16 632 1 "${weather_status:- }" &&
+        panel_forecast 600 656 2 &&
+        panel_text 496 780 1 "Open-Meteo" &&
+        fbink -q -V -w -s
+}
+
+render_compact() {
+    clock=$(date '+%H:%M') || return 1
+    today=$(date '+%Y / %m / %d') || return 1
+    weekday=$(date '+%a') || return 1
+    quote=$(daily_quote) || return 1
+
+    # Compose the framebuffer without refreshing until the frame is complete.
+    fbink -q -V -b -B WHITE -k || return 1
+    if [ "$layout" = 600x800 ]; then
+        render_portrait
+        return
+    fi
+    panel_rect 350 12 1 236 &&
+        panel_rect 0 260 800 1 &&
+        panel_rect 350 276 1 160 &&
+        panel_rect 0 456 800 1 &&
+        panel_rect 200 502 1 62 &&
+        panel_rect 400 502 1 62 &&
+        panel_rect 600 502 1 62 &&
+        panel_text 32 64 7 "$clock" &&
+        panel_text 64 150 2 "$today" &&
+        panel_text 140 194 3 "$weekday" &&
+        panel_calendar 352 448 20 56 24 &&
+        panel_text 24 280 2 "Issaquah, WA" || return 1
+
+    if [ -s "$STATE/weather" ]; then
+        read -r temp humidity code wind < "$STATE/weather" || return 1
+        description=$(condition "$code" | wrap_text 20) || return 1
+        panel_text 24 322 5 "$temp F" &&
+            panel_icon "$code" 270 318 &&
+            panel_text 24 382 2 "$description" &&
+            panel_text 390 280 2 "Humidity" &&
+            panel_text 390 312 3 "$humidity%" &&
+            panel_text 590 280 2 "Wind" &&
+            panel_text 590 312 3 "$wind mph" || return 1
+    else
+        panel_text 24 330 2 "Weather unavailable" || return 1
+    fi
+    panel_text 390 364 1 "DAILY QUOTE" &&
+        panel_text 390 388 2 "$quote" &&
+        panel_text 24 436 1 "${weather_status:- }" &&
+        panel_forecast 800 456 3 &&
+        panel_text 696 580 1 "Open-Meteo" &&
+        fbink -q -V -w -s
+}
+
 render() {
+    if [ "$text_size" -eq 2 ]; then
+        render_compact
+        return
+    fi
     clock=$(date +%H:%M) || return 1
-    today=$(date '+%A, %B %d %Y') || return 1
+    today=$(date "+$date_format") || return 1
     month_grid=$(calendar) || return 1
     hourly=$(forecast) || return 1
     quote=$(daily_quote) || return 1
@@ -169,16 +382,16 @@ render() {
         summary='Weather unavailable'
     fi
 
-    fbink -q -V -S 11 -X 48 -Y 70 -- "$clock" &&
-        block 48 200 29 2 "$today
+    fbink -q -V -F IBM -S "$clock_size" -X "$left" -Y "$clock_y" -- "$clock" &&
+        block "$left" "$date_y" "$date_width" 2 "$today
 Issaquah, WA" &&
-        block 48 350 27 5 "$summary
+        block "$left" "$summary_y" "$text_width" 5 "$summary
 $weather_status" &&
-        block 48 744 27 4 "DAILY QUOTE
+        block "$left" "$quote_y" "$text_width" 4 "DAILY QUOTE
 
 $quote" &&
-        block 792 84 24 8 "$month_grid" &&
-        block 792 450 24 14 "HOURLY TEMPERATURES
+        block "$right" "$calendar_y" "$calendar_width" 8 "$month_grid" &&
+        block "$right" "$forecast_y" "$calendar_width" 14 "HOURLY TEMPERATURES
 
 $hourly"
 }

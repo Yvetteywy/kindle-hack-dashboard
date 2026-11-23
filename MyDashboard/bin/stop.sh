@@ -1,7 +1,7 @@
 #!/bin/sh
 
 STATE=/tmp/mydashboard.run
-LOG=/tmp/mydashboard.log
+LOG=/mnt/us/mydashboard.log
 [ -d "$STATE" ] || exit 0
 
 # The worker checks this after each render and during its sleep.
