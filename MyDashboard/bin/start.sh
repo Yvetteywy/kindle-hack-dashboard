@@ -5,7 +5,7 @@ ROOT=${BIN%/bin}
 PATH="$BIN:$PATH:/usr/bin:/usr/sbin:/bin:/sbin"
 export PATH
 STATE=/tmp/mydashboard.run
-LOG=/mnt/us/mydashboard.log
+LOG="$ROOT/mydashboard.log"
 
 if [ "${1:-}" = --run ]; then
     orientation=${2:-landscape}
@@ -67,7 +67,7 @@ cleanup() {
     fi
     printf '%s\n' "$result" > "$LOG.status"
     rm -f "$STATE/stop" "$STATE/weather" "$STATE/response" "$STATE/weather.new" \
-        "$STATE/location" "$STATE/timezone"
+        "$STATE/location" "$STATE/timezone" "$STATE/font" "$ROOT/last-orientation.new"
     rmdir "$STATE" || result=1
     exit "$result"
 }
@@ -82,7 +82,7 @@ stop_requested && exit 0
 
 if [ -f "$ROOT/location.json" ]; then
     /bin/sh "$BIN/python.sh" "$BIN/setup_server.py" --prepare "$STATE" ||
-        fail "could not load saved city; use Configure city or see README."
+        fail "could not load saved city; see README to reset settings and detect the city again."
 fi
 
 display=$(fbink -q -V -e) || fail "cannot read framebuffer dimensions."
@@ -103,6 +103,13 @@ case "$dimensions" in
     '') fail "cannot parse framebuffer dimensions." ;;
     *) fail "unsupported framebuffer: $dimensions; dashboard requires 800x600 or 1448x1072 landscape. Kindle UI left unchanged." ;;
 esac
+
+. "$BIN/font.sh"
+load_font || fail "could not load font settings."
+if [ "$FONT" != bitmap ]; then
+    fbink -q -V -t "regular=$FONT_REGULAR,bold=$FONT_BOLD,px=16,compute,notrunc" -- "Font check" >/dev/null ||
+        fail "smooth fonts require an OpenType-enabled FBInk build; choose Font: Classic bitmap in KUAL."
+fi
 
 rotation=$(fbdepth -q -o) || fail "cannot read framebuffer rotation."
 case "$rotation" in [0-3]) ;; *) fail "invalid framebuffer rotation: $rotation" ;; esac
@@ -134,6 +141,10 @@ if ! display_matches; then
     fi
 fi
 stop_requested && exit 0
+
+printf '%s\n' "$orientation" > "$ROOT/last-orientation.new" &&
+    mv -f "$ROOT/last-orientation.new" "$ROOT/last-orientation" ||
+    fail "could not remember dashboard orientation."
 
 /bin/sh "$BIN/dashboard.sh" "$STATE" "$target_dimensions" </dev/null &
 worker=$!

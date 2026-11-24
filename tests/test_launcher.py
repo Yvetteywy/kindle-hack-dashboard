@@ -1,7 +1,9 @@
 import json
 import os
+from itertools import product
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,12 +22,15 @@ class LauncherTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.bin = self.root / "bin"
         self.bin.mkdir()
+        shutil.copy(ROOT / "MyDashboard/bin/font.sh", self.bin)
+        (self.root / "fonts").symlink_to(ROOT / "MyDashboard/fonts", target_is_directory=True)
         self.usb = self.root / "usb"
         self.usb.mkdir()
         self.state = self.root / "state"
         self.events = self.root / "events"
-        self.log = self.usb / "mydashboard.log"
-        self.status = self.usb / "mydashboard.log.status"
+        self.log = self.root / "mydashboard.log"
+        self.status = self.root / "mydashboard.log.status"
+        self.setup_log = self.root / "mydashboard-setup.log"
         for name in ("start.sh", "stop.sh"):
             source = (ROOT / "MyDashboard/bin" / name).read_text()
             source = source.replace("/tmp/mydashboard.run", str(self.state))
@@ -65,11 +70,13 @@ class LauncherTests(unittest.TestCase):
     def test_unsupported_display_leaves_ui_power_and_rotation_untouched(self):
         self.command("fbink", 'echo "screenWidth=758;screenHeight=1024;"')
         self.log.write_text("previous run\n")
+        (self.root / "last-orientation").write_text("portrait\n")
         status, log = self.launch()
         self.assertEqual(status, "1")
         self.assertTrue(log.startswith("previous run\n"))
         self.assertIn("unsupported framebuffer: 758x1024", log)
         self.assertFalse(self.events.exists())
+        self.assertEqual((self.root / "last-orientation").read_text(), "portrait\n")
 
     def test_unreadable_display_leaves_device_untouched(self):
         self.command("fbink", "exit 1")
@@ -115,6 +122,8 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("fbdepth -q -r 0", events)
         self.assertIn("initctl start lab126_gui", events)
         self.assertIn("power -i com.lab126.powerd preventScreenSaver 0", events)
+        self.assertEqual((self.root / "last-orientation").read_text(), "landscape\n")
+        self.assertEqual(list(self.usb.iterdir()), [])
 
     def test_stop_reads_usb_visible_status(self):
         self.state.mkdir()
@@ -174,6 +183,7 @@ class LauncherTests(unittest.TestCase):
         self.assertNotIn("fbdepth -q -r UR", events)
         self.assertNotIn("fbdepth -q -r CW", events)
         self.assertIn("fbdepth -q -r 0", events)
+        self.assertEqual((self.root / "last-orientation").read_text(), "portrait\n")
 
     def test_portrait_rotates_from_landscape_and_restores_original_rotation(self):
         self.command(
@@ -243,9 +253,13 @@ class LauncherTests(unittest.TestCase):
             'exec /bin/date -d "2026-08-31 15:25:00" "$@"',
         )
         env = dict(self.env, PATH=str(self.bin) + ":" + os.environ["PATH"])
-        for width, height in ((800, 600), (600, 800), (1448, 1072)):
-            with self.subTest(width=width, height=height):
+        smooth_sizes = {"sans": {}, "serif": {}}
+        for font, (width, height) in product(
+            ("bitmap", "sans", "serif"), ((800, 600), (600, 800), (1448, 1072)),
+        ):
+            with self.subTest(font=font, width=width, height=height):
                 self.state.mkdir()
+                (self.state / "font").write_text(font + "\n")
                 self.events.unlink(missing_ok=True)
                 subprocess.run(
                     ["/bin/sh", str(self.bin / "dashboard.sh"),
@@ -266,15 +280,30 @@ class LauncherTests(unittest.TestCase):
                 for args in calls:
                     if "--" not in args:
                         continue
-                    self.assertEqual(args[args.index("-F") + 1], "IBM")
-                    size = int(args[args.index("-S") + 1])
-                    x = int(args[args.index("-X") + 1])
-                    y = int(args[args.index("-Y") + 1])
                     text = args[args.index("--") + 1]
                     texts.append(text)
                     lines = text.split("\n")
-                    right = x + max(map(len, lines)) * 8 * size
-                    bottom = y + len(lines) * 8 * size
+                    if font == "bitmap":
+                        self.assertEqual(args[args.index("-F") + 1], "IBM")
+                        size = int(args[args.index("-S") + 1])
+                        x = int(args[args.index("-X") + 1])
+                        y = int(args[args.index("-Y") + 1])
+                        right = x + max(map(len, lines)) * 8 * size
+                        bottom = y + len(lines) * 8 * size
+                    else:
+                        options = dict(
+                            part.split("=", 1) if "=" in part else (part, "")
+                            for part in args[args.index("-t") + 1].split(",")
+                        )
+                        family = "DejaVuSans" if font == "sans" else "DejaVuSerif"
+                        self.assertTrue(options["regular"].endswith("/" + family + ".ttf"))
+                        self.assertTrue(options["bold"].endswith("/" + family + "-Bold.ttf"))
+                        self.assertIn("notrunc", options)
+                        x, y = int(options["left"]), int(options["top"])
+                        right = width - int(options["right"])
+                        bottom = height - int(options["bottom"])
+                        self.assertLessEqual(len(lines) * (int(options["px"]) + 2), bottom - y)
+                        smooth_sizes[font][width, height, x, y, text] = int(options["px"])
                     self.assertGreaterEqual(x, 0)
                     self.assertGreaterEqual(y, 0)
                     self.assertLessEqual(right, width)
@@ -306,7 +335,11 @@ class LauncherTests(unittest.TestCase):
                     self.assertIn("-s", calls[-1])
                     self.assertTrue(all("-b" in args for args in calls[:-1] if "-c" not in args))
                 else:
-                    self.assertEqual(len(rectangles), 6)
+                    if font == "bitmap":
+                        self.assertEqual(len(rectangles), 6)
+                    else:
+                        self.assertEqual([args[-1] for args in calls if "-h" in args], ["31"])
+                        self.assertIn("-s", calls[-1])
                     forecast = next(text for text in texts if text.startswith("HOURLY"))
                     self.assertEqual(len(forecast.splitlines()[2:]), 12)
                     self.assertIn("--", forecast)
@@ -315,6 +348,10 @@ class LauncherTests(unittest.TestCase):
                 for file in self.state.iterdir():
                     file.unlink()
                 self.state.rmdir()
+        self.assertEqual(smooth_sizes["sans"].keys(), smooth_sizes["serif"].keys())
+        for label, size in smooth_sizes["sans"].items():
+            with self.subTest(label=label):
+                self.assertGreater(size, smooth_sizes["serif"][label])
 
     def test_compact_weather_failure_still_displays_clock_and_calendar(self):
         source = (ROOT / "MyDashboard/bin/dashboard.sh").read_text()
@@ -324,6 +361,7 @@ class LauncherTests(unittest.TestCase):
         self.command("curl", "exit 1")
         self.command("fbink", 'printf "%s\\0" "$@" >> "$EVENTS"\nprintf "\\0" >> "$EVENTS"')
         self.command("sleep", f'touch "{self.state}/stop"')
+        self.command("date", 'if [ "$1" = +%Z ]; then exit 0; fi\nexec /bin/date "$@"')
         env = dict(self.env, PATH=str(self.bin) + ":" + os.environ["PATH"])
         result = subprocess.run(
             ["/bin/sh", str(self.bin / "dashboard.sh"), str(self.state), "800x600"],
@@ -340,8 +378,42 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("Weather unavailable", texts)
         self.assertIn("Weather update failed", texts)
         self.assertIn("No forecast available", texts)
+        self.assertIn("HOURLY TEMPERATURES", texts)
+        self.assertFalse(any("()" in text for text in texts))
         self.assertEqual(len([args for args in calls if "-h" in args]), 1)
         self.assertIn("-s", calls[-1])
+
+    def test_smooth_font_failure_leaves_ui_power_and_rotation_untouched(self):
+        self.command(
+            "fbink",
+            'if [ "$3" = -e ]; then echo "screenWidth=800;screenHeight=600;"; else exit 1; fi',
+        )
+        status, log = self.launch()
+        self.assertEqual(status, "1")
+        self.assertIn("OpenType-enabled FBInk", log)
+        self.assertFalse(self.events.exists())
+
+    def test_missing_bundled_font_fails_before_ui_shutdown(self):
+        (self.root / "fonts").unlink()
+        status, log = self.launch()
+        self.assertEqual(status, "1")
+        self.assertIn("missing bundled font files", log)
+        self.assertFalse(self.events.exists())
+
+    def test_bitmap_needs_neither_bundled_fonts_nor_opentype_support(self):
+        (self.root / "fonts").unlink()
+        self.install_saved_city({
+            "name": "Tokyo", "latitude": 35.68, "longitude": 139.69,
+            "timezone": "Asia/Tokyo", "font": "bitmap",
+        })
+        self.command(
+            "fbink",
+            'if [ "$3" = -e ]; then echo "screenWidth=1448;screenHeight=1072;"; else exit 1; fi',
+        )
+        self.command("dashboard.sh", 'cat "$1/font" >> "$EVENTS"')
+        status, _ = self.launch()
+        self.assertEqual(status, "0")
+        self.assertIn("bitmap", self.events.read_text())
 
     def install_saved_city(self, data):
         source = (ROOT / "MyDashboard/bin/setup_server.py").read_text()
@@ -365,7 +437,7 @@ class LauncherTests(unittest.TestCase):
         self.command(
             "dashboard.sh",
             'cat "$1/location" >> "$EVENTS"\n'
-            'TZ=":$1/timezone" date -d @0 +%H:%M >> "$EVENTS"',
+            'read -r TZ < "$1/timezone"\nexport TZ\ndate -d @0 +%H:%M >> "$EVENTS"',
         )
         self.command("fbink", 'echo "screenWidth=1448;screenHeight=1072;"')
         status, _ = self.launch()
@@ -382,34 +454,105 @@ class LauncherTests(unittest.TestCase):
         source = source.replace("/tmp/mydashboard.run", str(self.state))
         source = source.replace("/mnt/us/", str(self.usb) + "/")
         (self.bin / "setup.sh").write_text(source)
+        self.command("start.sh", 'echo "start $*" >> "$EVENTS"')
 
-    def test_setup_stops_dashboard_before_opening_browser(self):
+    def test_kual_font_actions_preserve_city_and_stop_dashboard_without_browser(self):
         self.install_setup_launcher()
-        self.state.mkdir()
-        self.command("python.sh", 'echo prerequisites >> "$EVENTS"')
-        self.command("curl", "echo mydashboard-setup-v1")
+        city = {"name": "Tokyo", "latitude": 35.68, "longitude": 139.69, "timezone": "Asia/Tokyo"}
+        self.install_saved_city(city)
         self.command("stop.sh", f'rmdir "{self.state}"\necho stopped >> "$EVENTS"')
-        subprocess.run(
-            ["/bin/sh", str(self.bin / "setup.sh")], env=self.env, check=True, timeout=5,
-        )
-        events = self.events.read_text()
-        self.assertIn("app://com.lab126.browser#going?url=http://127.0.0.1:8765/", events)
-        self.assertLess(events.index("stopped"), events.index("power"))
-        self.assertFalse(self.state.exists())
+        self.command("curl", 'echo unexpected-network >> "$EVENTS"\nexit 1')
+        menu = json.loads((ROOT / "MyDashboard/menu.json").read_text())
+        actions = [item["action"] for item in menu["items"][0]["items"] if item["name"].startswith("Font:")]
+        self.assertEqual(len(actions), 3)
+        for action in actions:
+            with self.subTest(action=action):
+                self.state.mkdir()
+                self.events.unlink(missing_ok=True)
+                script, *args = shlex.split(action)
+                previous = {"sans": None, "serif": "landscape", "bitmap": "portrait"}[args[-1]]
+                if previous is None:
+                    (self.root / "last-orientation").unlink(missing_ok=True)
+                else:
+                    (self.root / "last-orientation").write_text(previous + "\n")
+                subprocess.run(
+                    ["/bin/sh", str(self.bin / Path(script).name), *args],
+                    env=self.env, check=True, timeout=5,
+                )
+                saved = json.loads((self.root / "location.json").read_text())
+                self.assertEqual(saved, dict(city, font=args[-1]))
+                self.assertEqual(self.events.read_text(), "stopped\nstart " + (previous or "portrait") + "\n")
+                self.assertFalse(self.state.exists())
+                self.assertIn(str(self.log), self.setup_log.read_text())
+                self.assertEqual(list(self.usb.iterdir()), [])
 
     def test_setup_missing_runtime_leaves_dashboard_untouched(self):
         self.install_setup_launcher()
         self.state.mkdir()
         self.command("python.sh", 'echo "missing runtime" >&2\nexit 1')
         result = subprocess.run(
-            ["/bin/sh", str(self.bin / "setup.sh")],
+            ["/bin/sh", str(self.bin / "setup.sh"), "--font", "serif"],
             env=self.env, capture_output=True, text=True, timeout=5,
         )
         self.assertEqual(result.returncode, 1)
         self.assertTrue(self.state.exists())
         self.assertFalse(self.events.exists())
         self.assertIn("prerequisites are unavailable", result.stderr)
-        self.assertIn("missing runtime", (self.usb / "mydashboard-setup.log").read_text())
+        self.assertIn("missing runtime", self.setup_log.read_text())
+
+    def test_ip_detection_stops_dashboard_and_does_not_open_browser(self):
+        self.install_setup_launcher()
+        self.state.mkdir()
+        self.command("stop.sh", f'rmdir "{self.state}"\necho stopped >> "$EVENTS"')
+        self.command("python.sh", 'echo "$*" >> "$EVENTS"')
+        subprocess.run(
+            ["/bin/sh", str(self.bin / "setup.sh"), "--detect-location"],
+            env=self.env, check=True, timeout=5,
+        )
+        events = self.events.read_text()
+        self.assertLess(events.index("--check"), events.index("stopped"))
+        self.assertLess(events.index("stopped"), events.index("--detect-location"))
+        self.assertLess(events.index("--detect-location"), events.index("start portrait"))
+        self.assertNotIn("power", events)
+        self.assertFalse(self.state.exists())
+
+    def test_ip_detection_failure_is_logged_and_returns_failure(self):
+        self.install_setup_launcher()
+        self.command("python.sh", '[ "$2" = --check ] && exit 0\necho "lookup offline" >&2\nexit 1')
+        result = subprocess.run(
+            ["/bin/sh", str(self.bin / "setup.sh"), "--detect-location"],
+            env=self.env, capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("could not detect city", result.stderr)
+        self.assertIn("lookup offline", self.setup_log.read_text())
+        self.assertFalse(self.events.exists())
+
+    def test_settings_report_an_immediate_restart_failure(self):
+        self.install_setup_launcher()
+        self.command("python.sh", "exit 0")
+        self.command("start.sh", 'echo "missing nohup" >&2\nexit 1')
+        result = subprocess.run(
+            ["/bin/sh", str(self.bin / "setup.sh"), "--font", "sans"],
+            env=self.env, capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("settings saved, but could not start dashboard", result.stderr)
+        self.assertIn("missing nohup", self.setup_log.read_text())
+
+    def test_invalid_remembered_orientation_leaves_running_dashboard_untouched(self):
+        self.install_setup_launcher()
+        self.state.mkdir()
+        (self.root / "last-orientation").write_text("invalid\n")
+        self.command("python.sh", 'echo unexpected-update >> "$EVENTS"')
+        result = subprocess.run(
+            ["/bin/sh", str(self.bin / "setup.sh"), "--font", "sans"],
+            env=self.env, capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("invalid last dashboard orientation", result.stderr)
+        self.assertTrue(self.state.exists())
+        self.assertFalse(self.events.exists())
 
 
 if __name__ == "__main__":

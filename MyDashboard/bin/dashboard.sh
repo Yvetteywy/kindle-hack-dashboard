@@ -12,9 +12,10 @@ if [ -f "$STATE/location" ]; then
     {
         read -r city &&
             read -r URL
-    } < "$STATE/location" && [ -r "$STATE/timezone" ] ||
+    } < "$STATE/location" &&
+        IFS= read -r TZ < "$STATE/timezone" &&
+        [ -n "$TZ" ] ||
         { echo "MyDashboard: invalid prepared city settings." >&2; exit 1; }
-    TZ=":$STATE/timezone"
 elif [ -f "$ROOT/location.json" ]; then
     echo "MyDashboard: saved city was not prepared; launch through start.sh." >&2
     exit 1
@@ -39,6 +40,15 @@ case "$layout" in
         exit 1
         ;;
 esac
+
+SCREEN_WIDTH=${layout%x*}
+SCREEN_HEIGHT=${layout#*x}
+FONT_BATCH=1
+. "$BIN/font.sh"
+load_font || exit 1
+if [ "$layout" = 1448x1072 ] && [ "$FONT" = bitmap ]; then
+    FONT_BATCH=0
+fi
 
 stop_requested() { [ -f "$STATE/stop" ] || [ -f "$ROOT/STOP" ]; }
 uptime_seconds() {
@@ -163,7 +173,7 @@ block() {
         NR <= h { print substr($0 pad, 1, w) }
         END { for (i = NR; i < h; i++) print pad }
     ') || return 1
-    fbink -q -V -F IBM -S "$text_size" -X "$x" -Y "$y" -- "$padded"
+    font_text "$x" "$y" "$text_size" "$padded"
 }
 
 forecast() {
@@ -185,7 +195,7 @@ forecast() {
 }
 
 panel_text() {
-    fbink -q -V -b -F IBM -S "$3" -X "$1" -Y "$2" -- "$4"
+    font_text "$@"
 }
 
 panel_rect() {
@@ -193,32 +203,32 @@ panel_rect() {
 }
 
 panel_calendar() {
-    cal_left=$1 cal_width=$2 cal_top=$3 cal_step=$4 cal_row=$5
-    cal_grid=$((cal_left + (cal_width - (6 * cal_step + 32)) / 2))
+    cal_left=$1 cal_width=$2 cal_top=$3 cal_step=$4 cal_row=$5 cal_size=${6:-2}
+    cal_grid=$((cal_left + (cal_width - (6 * cal_step + 16 * cal_size)) / 2))
     stamp=$(date '+%m %Y %d %w %B') || return 1
     set -- $stamp
     heading="$5 $2"
-    panel_text "$((cal_left + (cal_width - ${#heading} * 16) / 2))" "$cal_top" 2 "$heading" || return 1
+    panel_text "$((cal_left + (cal_width - ${#heading} * 8 * cal_size) / 2))" "$cal_top" "$cal_size" "$heading" heading || return 1
     awk -v m="$1" -v y="$2" -v today="$3" -v weekday="$4" \
-        -v x="$cal_grid" -v top="$cal_top" -v step="$cal_step" -v row="$cal_row" '
+        -v x="$cal_grid" -v top="$cal_top" -v step="$cal_step" -v row="$cal_row" -v size="$cal_size" '
         BEGIN {
             days = 31
             if (m == 4 || m == 6 || m == 9 || m == 11) days = 30
             if (m == 2) days = 28 + (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0))
             first = (weekday - today + 36) % 7
             split("Su Mo Tu We Th Fr Sa", labels, " ")
-            for (i = 0; i < 7; i++) print x + i * step, top + 40, 0, labels[i + 1]
+            for (i = 0; i < 7; i++) print x + i * step, top + size * 20, 0, labels[i + 1]
             for (d = 1; d <= days; d++) {
                 slot = first + d - 1
                 printf "%d %d %d %02d\n", x + (slot % 7) * step,
-                    top + 74 + int(slot / 7) * row, d == today, d
+                    top + size * 37 + int(slot / 7) * row, d == today, d
             }
         }
     ' | while read -r cx cy selected label; do
         if [ "$selected" -eq 1 ]; then
-            fbink -q -V -b -h -F IBM -S 2 -X "$cx" -Y "$cy" -- "$label" || exit 1
+            panel_text "$cx" "$cy" "$cal_size" "$label" invert || exit 1
         else
-            panel_text "$cx" "$cy" 2 "$label" || exit 1
+            panel_text "$cx" "$cy" "$cal_size" "$label" || exit 1
         fi
     done
 }
@@ -226,7 +236,7 @@ panel_calendar() {
 panel_forecast() {
     forecast_column=$(($1 / 4)) forecast_top=$2 forecast_size=$3
     zone=$(date '+%Z') || return 1
-    panel_text 16 "$((forecast_top + 16))" 1 "HOURLY TEMPERATURES ($zone)" || return 1
+    panel_text 16 "$((forecast_top + 16))" 1 "HOURLY TEMPERATURES${zone:+ ($zone)}" || return 1
     if [ ! -s "$STATE/weather" ]; then
         panel_text 24 "$((forecast_top + 60))" 2 "No forecast available"
         return
@@ -316,7 +326,7 @@ render_portrait() {
         panel_rect 150 702 1 62 &&
         panel_rect 300 702 1 62 &&
         panel_rect 450 702 1 62 &&
-        panel_text 20 100 5 "$clock" &&
+        panel_text 20 100 5 "$clock" display &&
         panel_text 16 170 2 "$today" &&
         panel_text 84 212 3 "$weekday" &&
         panel_calendar 240 360 28 48 30 &&
@@ -325,7 +335,7 @@ render_portrait() {
     if [ -s "$STATE/weather" ]; then
         read -r temp humidity code wind < "$STATE/weather" || return 1
         description=$(condition "$code" | wrap_text 13) || return 1
-        panel_text 16 412 4 "$temp F" &&
+        panel_text 16 412 4 "$temp F" display &&
             panel_icon "$code" 172 480 &&
             panel_text 16 550 2 "$description" &&
             panel_text 264 364 2 "Humidity" &&
@@ -365,7 +375,7 @@ render_compact() {
         panel_rect 200 502 1 62 &&
         panel_rect 400 502 1 62 &&
         panel_rect 600 502 1 62 &&
-        panel_text 32 64 7 "$clock" &&
+        panel_text 32 64 7 "$clock" display &&
         panel_text 64 150 2 "$today" &&
         panel_text 140 194 3 "$weekday" &&
         panel_calendar 352 448 20 56 24 &&
@@ -374,7 +384,7 @@ render_compact() {
     if [ -s "$STATE/weather" ]; then
         read -r temp humidity code wind < "$STATE/weather" || return 1
         description=$(condition "$code" | wrap_text 20) || return 1
-        panel_text 24 322 5 "$temp F" &&
+        panel_text 24 322 5 "$temp F" display &&
             panel_icon "$code" 270 318 &&
             panel_text 24 382 2 "$description" &&
             panel_text 390 280 2 "Humidity" &&
@@ -411,7 +421,10 @@ render() {
         summary='Weather unavailable'
     fi
 
-    fbink -q -V -F IBM -S "$clock_size" -X "$left" -Y "$clock_y" -- "$clock" &&
+    if [ "$FONT_BATCH" -eq 1 ]; then
+        fbink -q -V -b -B WHITE -k || return 1
+    fi
+    font_text "$left" "$clock_y" "$clock_size" "$clock" display &&
         block "$left" "$date_y" "$date_width" 2 "$today
 $city" &&
         block "$left" "$summary_y" "$text_width" 5 "$summary
@@ -419,10 +432,21 @@ $weather_status" &&
         block "$left" "$quote_y" "$text_width" 4 "DAILY QUOTE
 
 $quote" &&
-        block "$right" "$calendar_y" "$calendar_width" 8 "$month_grid" &&
+        render_large_calendar "$month_grid" &&
         block "$right" "$forecast_y" "$calendar_width" 14 "HOURLY TEMPERATURES
 
-$hourly"
+$hourly" || return 1
+    if [ "$FONT_BATCH" -eq 1 ]; then
+        fbink -q -V -w -s
+    fi
+}
+
+render_large_calendar() {
+    if [ "$FONT" = bitmap ]; then
+        block "$right" "$calendar_y" "$calendar_width" 8 "$1"
+    else
+        panel_calendar "$right" 576 "$calendar_y" 80 32 3
+    fi
 }
 
 next_fetch=0

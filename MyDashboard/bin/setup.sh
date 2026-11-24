@@ -1,10 +1,10 @@
 #!/bin/sh
 
 BIN=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd) || exit 1
+ROOT=${BIN%/bin}
 PATH="$BIN:$PATH:/usr/bin:/usr/sbin:/bin:/sbin"
 export PATH
-LOG=/mnt/us/mydashboard-setup.log
-URL=http://127.0.0.1:8765
+LOG="$ROOT/mydashboard-setup.log"
 
 fail() {
     echo "MyDashboard: $*; see $LOG." >&2
@@ -12,37 +12,43 @@ fail() {
     exit 1
 }
 
-for tool in curl nohup lipc-set-prop; do
-    command -v "$tool" >/dev/null 2>&1 || fail "missing $tool"
-done
+case "${1:-}" in
+    --detect-location)
+        [ "$#" -eq 1 ] || fail "usage: setup.sh --detect-location"
+        command -v curl >/dev/null 2>&1 || fail "missing curl"
+        failure="could not detect city"
+        ;;
+    --font)
+        [ "$#" -eq 2 ] || fail "usage: setup.sh --font {sans|serif|bitmap}"
+        case "$2" in
+            sans|serif|bitmap) ;;
+            *) fail "unknown font: $2" ;;
+        esac
+        failure="could not save font"
+        ;;
+    *) fail "choose Detect city from Wi-Fi or a Font entry in KUAL" ;;
+esac
+
+orientation=portrait
+if [ -f "$ROOT/last-orientation" ]; then
+    IFS= read -r orientation < "$ROOT/last-orientation" ||
+        fail "cannot read last dashboard orientation"
+    case "$orientation" in
+        portrait|landscape) ;;
+        *) fail "invalid last dashboard orientation; remove last-orientation or start a dashboard explicitly" ;;
+    esac
+fi
+
 /bin/sh "$BIN/python.sh" "$BIN/setup_server.py" --check >> "$LOG" 2>&1 ||
-    fail "city setup prerequisites are unavailable"
+    fail "settings prerequisites are unavailable"
 
 if [ -d /tmp/mydashboard.run ]; then
     /bin/sh "$BIN/stop.sh" >> "$LOG" 2>&1 || fail "could not stop dashboard"
 fi
 
-ready() {
-    [ "$(curl --noproxy '*' -fsS --max-time 1 "$URL/health" 2>/dev/null)" = mydashboard-setup-v1 ]
-}
-if ! ready; then
-    set -- /bin/sh "$BIN/python.sh" "$BIN/setup_server.py"
-    if command -v setsid >/dev/null 2>&1; then
-        set -- setsid "$@"
-    fi
-    nohup "$@" </dev/null >> "$LOG" 2>&1 &
-    setup_pid=$!
-    remaining=10
-    while ! ready; do
-        remaining=$((remaining - 1))
-        if [ "$remaining" -eq 0 ]; then
-            kill "$setup_pid" 2>/dev/null || :
-            fail "setup service did not become ready"
-        fi
-        sleep 1
-    done
-fi
+/bin/sh "$BIN/python.sh" "$BIN/setup_server.py" "$@" >> "$LOG" 2>&1 ||
+    fail "$failure"
 
-lipc-set-prop com.lab126.appmgrd start \
-    "app://com.lab126.browser#going?url=$URL/" >> "$LOG" 2>&1 ||
-    fail "could not open Kindle browser"
+/bin/sh "$BIN/start.sh" "$orientation" >> "$LOG" 2>&1 ||
+    fail "settings saved, but could not start dashboard"
+echo "MyDashboard: requested $orientation dashboard startup; see $ROOT/mydashboard.log." >> "$LOG"
