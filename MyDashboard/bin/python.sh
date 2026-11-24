@@ -6,5 +6,5 @@ fi
 if [ -x /mnt/us/python3/bin/python3 ]; then
     exec /mnt/us/python3/bin/python3 "$@"
 fi
-echo "MyDashboard: city setup needs Python 3.9+ on PATH or in /mnt/us/python3/bin; see README." >&2
+echo "MyDashboard: settings need Python 3.9+ on PATH or in /mnt/us/python3/bin; see README." >&2
 exit 1

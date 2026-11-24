@@ -1,7 +1,9 @@
 #!/bin/sh
 
+BIN=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd) || exit 1
+ROOT=${BIN%/bin}
 STATE=/tmp/mydashboard.run
-LOG=/mnt/us/mydashboard.log
+LOG="$ROOT/mydashboard.log"
 [ -d "$STATE" ] || exit 0
 
 # The worker checks this after each render and during its sleep.

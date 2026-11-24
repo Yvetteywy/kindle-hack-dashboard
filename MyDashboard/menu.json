@@ -3,7 +3,10 @@
         {
             "name": "MyDashboard",
             "items": [
-                { "name": "Configure city", "action": "bin/setup.sh", "exitmenu": true },
+                { "name": "Detect city from Wi-Fi", "action": "bin/setup.sh --detect-location", "exitmenu": true },
+                { "name": "Font: Sans-serif", "action": "bin/setup.sh --font sans", "exitmenu": true },
+                { "name": "Font: Serif", "action": "bin/setup.sh --font serif", "exitmenu": true },
+                { "name": "Font: Classic bitmap", "action": "bin/setup.sh --font bitmap", "exitmenu": true },
                 { "name": "Start dashboard", "action": "bin/start.sh", "exitmenu": true },
                 { "name": "Start portrait dashboard", "action": "bin/start.sh portrait", "exitmenu": true },
                 { "name": "Stop dashboard", "action": "bin/stop.sh", "exitmenu": false }
