@@ -66,7 +66,8 @@ cleanup() {
         rm -f "$ROOT/STOP"
     fi
     printf '%s\n' "$result" > "$LOG.status"
-    rm -f "$STATE/stop" "$STATE/weather" "$STATE/response" "$STATE/weather.new"
+    rm -f "$STATE/stop" "$STATE/weather" "$STATE/response" "$STATE/weather.new" \
+        "$STATE/location" "$STATE/timezone"
     rmdir "$STATE" || result=1
     exit "$result"
 }
@@ -78,6 +79,11 @@ stop_requested() { [ -f "$STATE/stop" ] || [ -f "$ROOT/STOP" ]; }
 rm -f "$LOG.status"
 sleep 2
 stop_requested && exit 0
+
+if [ -f "$ROOT/location.json" ]; then
+    /bin/sh "$BIN/python.sh" "$BIN/setup_server.py" --prepare "$STATE" ||
+        fail "could not load saved city; use Configure city or see README."
+fi
 
 display=$(fbink -q -V -e) || fail "cannot read framebuffer dimensions."
 dimensions=$(printf '%s\n' "$display" |

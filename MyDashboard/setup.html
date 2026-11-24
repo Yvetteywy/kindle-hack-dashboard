@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MyDashboard city setup</title>
+<style>
+body { background: white; color: black; font: 20px sans-serif; margin: 20px; }
+h1 { font-size: 28px; }
+label { display: block; margin-top: 16px; }
+input, button { box-sizing: border-box; font: inherit; padding: 10px; }
+input { width: 100%; border: 1px solid black; background: white; color: black; }
+button { margin: 12px 0; border: 2px solid black; background: white; color: black; }
+button:disabled { color: #666; }
+#results button { display: block; width: 100%; text-align: left; }
+#message { border-top: 1px solid black; padding-top: 12px; }
+</style>
+</head>
+<body>
+<h1>MyDashboard city setup</h1>
+<p id="current">Loading current location...</p>
+<form id="search">
+<label for="city">City or postal code</label>
+<input id="city" name="city" maxlength="100" required>
+<label for="country">Country code (optional, e.g. US, GB, JP)</label>
+<input id="country" name="country" maxlength="2">
+<button id="find" type="submit">Search</button>
+</form>
+<div id="results"></div>
+<p id="selection">Search, then select the correct city and region.</p>
+<button id="save" type="button" disabled>Save selected city</button>
+<p id="message" role="status"></p>
+<p>After saving, return to KUAL and start the portrait or landscape dashboard.
+The dashboard itself has no browser controls.</p>
+<p>This local setup session expires after 15 minutes. Reopen Configure city in KUAL
+if it expires. City searches contact Open-Meteo; settings stay on this Kindle.</p>
+<p><a href="https://open-meteo.com/">Weather and geocoding by Open-Meteo</a></p>
+<script>
+(function () {
+    "use strict";
+    var token = "__TOKEN__";
+    var selected = null;
+    var busy = false;
+    function element(id) { return document.getElementById(id); }
+    function text(id, value) { element(id).textContent = value; }
+    function message(value) { text("message", value); }
+    function request(method, path, body, done) {
+        var xhr = new XMLHttpRequest();
+        var completed = false;
+        var timer;
+        function finish(error, data) {
+            if (completed) { return; }
+            completed = true;
+            clearTimeout(timer);
+            done(error, data);
+        }
+        xhr.onreadystatechange = function () {
+            var data;
+            if (xhr.readyState !== 4) { return; }
+            try { data = JSON.parse(xhr.responseText); }
+            catch (error) { finish("Setup service unavailable. Reopen Configure city in KUAL."); return; }
+            if (xhr.status < 200 || xhr.status >= 300) {
+                finish(data.error || "Setup request failed.");
+                return;
+            }
+            finish(null, data);
+        };
+        xhr.onerror = function () { finish("Cannot reach local setup. Reopen Configure city in KUAL."); };
+        xhr.open(method, path, true);
+        xhr.setRequestHeader("X-MyDashboard-Token", token);
+        if (body !== null) { xhr.setRequestHeader("Content-Type", "application/json"); }
+        timer = setTimeout(function () {
+            finish("Request timed out. Check Wi-Fi or reopen Configure city in KUAL.");
+            xhr.abort();
+        }, 20000);
+        xhr.send(body === null ? null : JSON.stringify(body));
+    }
+    function setBusy(value) {
+        busy = value;
+        element("find").disabled = value;
+        element("save").disabled = value || selected === null;
+    }
+    function select(city) {
+        if (busy) { return; }
+        selected = city;
+        text("selection", "Selected: " + city.name + ", " + city.region + ", " +
+            city.country + " (" + city.timezone + ")");
+        element("save").disabled = false;
+        message("Tap Save selected city to apply this location.");
+    }
+    function addResult(city) {
+        var button = document.createElement("button");
+        button.type = "button";
+        button.textContent = city.name + ", " + city.region + ", " + city.country +
+            " (" + city.timezone + ")";
+        button.onclick = function () { select(city); };
+        element("results").appendChild(button);
+    }
+    element("search").onsubmit = function () {
+        var query = element("city").value.replace(/^\s+|\s+$/g, "");
+        var country = element("country").value.replace(/^\s+|\s+$/g, "");
+        if (busy) { return false; }
+        if (query.length < 2) { message("Enter at least two characters."); return false; }
+        selected = null;
+        element("results").textContent = "";
+        text("selection", "Select the correct city and region from the results.");
+        setBusy(true);
+        message("Searching...");
+        request("GET", "/api/search?q=" + encodeURIComponent(query) +
+            "&country=" + encodeURIComponent(country), null, function (error, data) {
+                setBusy(false);
+                if (error) { message(error); return; }
+                if (!data.results.length) { message("No cities found. Try another spelling or country."); return; }
+                data.results.forEach(addResult);
+                message("Select a result, then save.");
+            });
+        return false;
+    };
+    element("save").onclick = function () {
+        if (busy || selected === null) { return; }
+        setBusy(true);
+        message("Saving...");
+        request("POST", "/api/location", selected, function (error, data) {
+            setBusy(false);
+            if (error) { message(error); return; }
+            text("current", "Saved city: " + data.name + " (" + data.timezone + ")");
+            message("Saved. Return to KUAL and start the dashboard. Screen label: " + data.display_name + ".");
+        });
+    };
+    setBusy(true);
+    request("GET", "/api/location", null, function (error, data) {
+        setBusy(false);
+        if (error) { message(error); return; }
+        text("current", (data.saved ? "Saved city: " : "Default city: ") +
+            data.name + " (" + data.timezone + ")");
+    });
+}());
+</script>
+</body>
+</html>

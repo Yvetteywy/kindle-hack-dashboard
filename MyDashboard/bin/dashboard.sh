@@ -5,7 +5,20 @@ STATE=$1
 BIN=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd) || exit 1
 ROOT=${BIN%/bin}
 LC_ALL=C
-TZ='PST8PDT,M3.2.0,M11.1.0'
+TZ='EST5EDT,M3.2.0,M11.1.0'
+city='Washington, DC'
+URL='https://api.open-meteo.com/v1/forecast?latitude=38.9072&longitude=-77.0369&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&hourly=temperature_2m&forecast_hours=12&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America%2FNew_York&timeformat=unixtime'
+if [ -f "$STATE/location" ]; then
+    {
+        read -r city &&
+            read -r URL
+    } < "$STATE/location" && [ -r "$STATE/timezone" ] ||
+        { echo "MyDashboard: invalid prepared city settings." >&2; exit 1; }
+    TZ=":$STATE/timezone"
+elif [ -f "$ROOT/location.json" ]; then
+    echo "MyDashboard: saved city was not prepared; launch through start.sh." >&2
+    exit 1
+fi
 export LC_ALL TZ
 
 layout=${2:-1448x1072}
@@ -26,8 +39,6 @@ case "$layout" in
         exit 1
         ;;
 esac
-
-URL='https://api.open-meteo.com/v1/forecast?latitude=47.5301&longitude=-122.0326&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&hourly=temperature_2m&forecast_hours=12&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America%2FLos_Angeles&timeformat=unixtime'
 
 stop_requested() { [ -f "$STATE/stop" ] || [ -f "$ROOT/STOP" ]; }
 uptime_seconds() {
@@ -273,14 +284,31 @@ wrap_text() {
     awk -v width="$1" '{
         line = ""
         for (i = 1; i <= NF; i++) {
-            if (line != "" && length(line) + length($i) + 1 > width) { print line; line = "" }
-            line = line (line == "" ? "" : " ") $i
+            word = $i
+            if (line != "" && length(line) + length(word) + 1 > width) { print line; line = "" }
+            while (length(word) > width) {
+                print substr(word, 1, width)
+                word = substr(word, width + 1)
+            }
+            line = line (line == "" ? "" : " ") word
         }
         print line
     }'
 }
 
+city_label() {
+    printf '%s\n' "$city" | wrap_text "$1" | awk -v width="$1" '
+        NR == 1 { first = $0 }
+        NR == 2 { second = $0 }
+        END {
+            print first
+            if (NR > 1) print (NR > 2 ? substr(second, 1, width - 3) "..." : second)
+        }
+    '
+}
+
 render_portrait() {
+    label=$(city_label 13) || return 1
     panel_rect 240 12 1 296 &&
         panel_rect 0 320 600 1 &&
         panel_rect 240 340 1 280 &&
@@ -292,7 +320,7 @@ render_portrait() {
         panel_text 16 170 2 "$today" &&
         panel_text 84 212 3 "$weekday" &&
         panel_calendar 240 360 28 48 30 &&
-        panel_text 16 364 2 "Issaquah, WA" || return 1
+        panel_text 16 364 2 "$label" || return 1
 
     if [ -s "$STATE/weather" ]; then
         read -r temp humidity code wind < "$STATE/weather" || return 1
@@ -329,6 +357,7 @@ render_compact() {
         render_portrait
         return
     fi
+    label=$(city_label 20) || return 1
     panel_rect 350 12 1 236 &&
         panel_rect 0 260 800 1 &&
         panel_rect 350 276 1 160 &&
@@ -340,7 +369,7 @@ render_compact() {
         panel_text 64 150 2 "$today" &&
         panel_text 140 194 3 "$weekday" &&
         panel_calendar 352 448 20 56 24 &&
-        panel_text 24 280 2 "Issaquah, WA" || return 1
+        panel_text 24 280 2 "$label" || return 1
 
     if [ -s "$STATE/weather" ]; then
         read -r temp humidity code wind < "$STATE/weather" || return 1
@@ -384,7 +413,7 @@ render() {
 
     fbink -q -V -F IBM -S "$clock_size" -X "$left" -Y "$clock_y" -- "$clock" &&
         block "$left" "$date_y" "$date_width" 2 "$today
-Issaquah, WA" &&
+$city" &&
         block "$left" "$summary_y" "$text_width" 5 "$summary
 $weather_status" &&
         block "$left" "$quote_y" "$text_width" 4 "DAILY QUOTE

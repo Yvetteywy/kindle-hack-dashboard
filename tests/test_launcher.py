@@ -1,10 +1,13 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
+from urllib.parse import parse_qs, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -230,7 +233,8 @@ class LauncherTests(unittest.TestCase):
         }
         fixture = self.root / "forecast.json"
         fixture.write_text(json.dumps(weather))
-        self.command("curl", f'cat "{fixture}"')
+        request = self.root / "weather-request"
+        self.command("curl", f'printf "%s\\n" "$@" > "{request}"\ncat "{fixture}"')
         self.command("fbink", 'printf "%s\\0" "$@" >> "$EVENTS"\nprintf "\\0" >> "$EVENTS"')
         self.command("sleep", f'touch "{self.state}/stop"')
         self.command(
@@ -253,6 +257,10 @@ class LauncherTests(unittest.TestCase):
                     for record in self.events.read_bytes().split(b"\0\0")
                     if record
                 ]
+                query = parse_qs(urlsplit(request.read_text().splitlines()[-1]).query)
+                self.assertEqual(query["latitude"], ["38.9072"])
+                self.assertEqual(query["longitude"], ["-77.0369"])
+                self.assertEqual(query["timezone"], ["America/New_York"])
                 rectangles = []
                 texts = []
                 for args in calls:
@@ -275,6 +283,7 @@ class LauncherTests(unittest.TestCase):
                         self.assertFalse(x < bx and right > ax and y < by and bottom > ay)
                     rectangles.append((x, y, right, bottom))
                 if width in (600, 800):
+                    self.assertIn("Washington,\nDC" if width == 600 else "Washington, DC", texts)
                     description = next(text for text in texts if text.startswith("Thunderstorms"))
                     self.assertEqual(description.replace("\n", " "), "Thunderstorms with hail")
                     forecast_y = 706 if width == 600 else 506
@@ -286,7 +295,7 @@ class LauncherTests(unittest.TestCase):
                     for index in (0, 3, 6, 9):
                         hour = subprocess.check_output(
                             ["/bin/date", "-d", f"@{weather['hourly']['time'][index]}", "+%H:%M"],
-                            env=dict(env, TZ="PST8PDT,M3.2.0,M11.1.0"), text=True,
+                            env=dict(env, TZ="EST5EDT,M3.2.0,M11.1.0"), text=True,
                         ).strip()
                         self.assertIn(hour, texts)
                     for args in calls:
@@ -333,6 +342,74 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("No forecast available", texts)
         self.assertEqual(len([args for args in calls if "-h" in args]), 1)
         self.assertIn("-s", calls[-1])
+
+    def install_saved_city(self, data):
+        source = (ROOT / "MyDashboard/bin/setup_server.py").read_text()
+        (self.bin / "setup_server.py").write_text(source)
+        self.command("python.sh", f'exec {shlex.quote(sys.executable)} "$@"')
+        (self.root / "location.json").write_text(json.dumps(data))
+
+    def test_invalid_saved_city_fails_before_ui_shutdown(self):
+        self.install_saved_city({"name": "Bad settings"})
+        status, log = self.launch()
+        self.assertEqual(status, "1")
+        self.assertIn("could not load saved city", log)
+        self.assertFalse(self.events.exists())
+        self.assertFalse(self.state.exists())
+
+    def test_saved_city_is_prepared_and_cleaned_up(self):
+        self.install_saved_city({
+            "name": "Tokyo", "latitude": 35.68,
+            "longitude": 139.69, "timezone": "Asia/Tokyo",
+        })
+        self.command(
+            "dashboard.sh",
+            'cat "$1/location" >> "$EVENTS"\n'
+            'TZ=":$1/timezone" date -d @0 +%H:%M >> "$EVENTS"',
+        )
+        self.command("fbink", 'echo "screenWidth=1448;screenHeight=1072;"')
+        status, _ = self.launch()
+        self.assertEqual(status, "0")
+        events = self.events.read_text()
+        self.assertIn("Tokyo", events)
+        self.assertIn("latitude=35.68", events)
+        self.assertIn("timezone=Asia%2FTokyo", events)
+        self.assertIn("09:00", events)
+        self.assertFalse(self.state.exists())
+
+    def install_setup_launcher(self):
+        source = (ROOT / "MyDashboard/bin/setup.sh").read_text()
+        source = source.replace("/tmp/mydashboard.run", str(self.state))
+        source = source.replace("/mnt/us/", str(self.usb) + "/")
+        (self.bin / "setup.sh").write_text(source)
+
+    def test_setup_stops_dashboard_before_opening_browser(self):
+        self.install_setup_launcher()
+        self.state.mkdir()
+        self.command("python.sh", 'echo prerequisites >> "$EVENTS"')
+        self.command("curl", "echo mydashboard-setup-v1")
+        self.command("stop.sh", f'rmdir "{self.state}"\necho stopped >> "$EVENTS"')
+        subprocess.run(
+            ["/bin/sh", str(self.bin / "setup.sh")], env=self.env, check=True, timeout=5,
+        )
+        events = self.events.read_text()
+        self.assertIn("app://com.lab126.browser#going?url=http://127.0.0.1:8765/", events)
+        self.assertLess(events.index("stopped"), events.index("power"))
+        self.assertFalse(self.state.exists())
+
+    def test_setup_missing_runtime_leaves_dashboard_untouched(self):
+        self.install_setup_launcher()
+        self.state.mkdir()
+        self.command("python.sh", 'echo "missing runtime" >&2\nexit 1')
+        result = subprocess.run(
+            ["/bin/sh", str(self.bin / "setup.sh")],
+            env=self.env, capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertTrue(self.state.exists())
+        self.assertFalse(self.events.exists())
+        self.assertIn("prerequisites are unavailable", result.stderr)
+        self.assertIn("missing runtime", (self.usb / "mydashboard-setup.log").read_text())
 
 
 if __name__ == "__main__":
